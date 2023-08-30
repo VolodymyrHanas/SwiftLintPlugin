@@ -1,35 +1,56 @@
-//
-//  main.swift
-//  Plugins/SwiftLint
-//
-//  Created by Lukas Pistrol on 23.06.22.
-//
-//  Big thanks to @marcoboerner on GitHub
-//  https://github.com/realm/SwiftLint/issues/3840#issuecomment-1085699163
-//
-
 import Foundation
 import PackagePlugin
 
 @main
 struct SwiftLintPlugin: BuildToolPlugin {
     func createBuildCommands(context: PluginContext, target: Target) async throws -> [Command] {
-        if ProcessInfo().environment["DISABLE_SWIFTLINT"] != nil {
+        guard let sourceTarget = target as? SourceModuleTarget else {
             return []
         }
+        return createBuildCommands(
+            inputFiles: sourceTarget.sourceFiles(withSuffix: "swift").map(\.path),
+            packageDirectory: context.package.directory,
+            workingDirectory: context.pluginWorkDirectory,
+            tool: try context.tool(named: "swiftlint")
+        )
+    }
+
+    private func createBuildCommands(
+        inputFiles: [Path],
+        packageDirectory: Path,
+        workingDirectory: Path,
+        tool: PluginContext.Tool
+    ) -> [Command] {
+        if inputFiles.isEmpty {
+            // Don't lint anything if there are no Swift source files in this target
+            return []
+        }
+
+        var arguments = [
+            "lint",
+            // We always pass all of the Swift source files in the target to the tool,
+            // so we need to ensure that any exclusion rules in the configuration are
+            // respected.
+            "--force-exclude",
+            "--cache-path", "\(workingDirectory)"
+        ]
+
+        // Manually look for configuration files, to avoid issues when the plugin does not execute our tool from the
+        // package source directory.
+        if let configuration = packageDirectory.firstConfigurationFileInParentDirectories() {
+            arguments.append(contentsOf: ["--config", "\(configuration.string)"])
+        }
+        arguments += inputFiles.map(\.string)
+
+        // We are not producing output files and this is needed only to not include cache files into bundle
+        let outputFilesDirectory = workingDirectory.appending("Output")
+
         return [
-            .buildCommand(
-                displayName: "Running SwiftLint for \(target.name)",
-                executable: try context.tool(named: "swiftlint").path,
-                arguments: [
-                    "lint",
-                    "--config",
-                    "\(context.package.directory.string)/.swiftlint.yml",
-                    "--cache-path",
-                    "\(context.pluginWorkDirectory.string)/cache",
-                    target.directory.string
-                ],
-                environment: [:]
+            .prebuildCommand(
+                displayName: "SwiftLint",
+                executable: tool.path,
+                arguments: arguments,
+                outputFilesDirectory: outputFilesDirectory
             )
         ]
     }
@@ -40,21 +61,15 @@ import XcodeProjectPlugin
 
 extension SwiftLintPlugin: XcodeBuildToolPlugin {
     func createBuildCommands(context: XcodePluginContext, target: XcodeTarget) throws -> [Command] {
-        return [
-            .buildCommand(
-                displayName: "Running SwiftLint for \(target.displayName)",
-                executable: try context.tool(named: "swiftlint").path,
-                arguments: [
-                    "lint",
-                    "--config",
-                    "\(context.xcodeProject.directory.string)/.swiftlint.yml",
-                    "--cache-path",
-                    "\(context.pluginWorkDirectory.string)/cache",
-                    context.xcodeProject.directory.string
-                ],
-                environment: [:]
-            )
-        ]
+        let inputFilePaths = target.inputFiles
+            .filter { $0.type == .source && $0.path.extension == "swift" }
+            .map(\.path)
+        return createBuildCommands(
+            inputFiles: inputFilePaths,
+            packageDirectory: context.xcodeProject.directory,
+            workingDirectory: context.pluginWorkDirectory,
+            tool: try context.tool(named: "swiftlint")
+        )
     }
 }
 #endif
